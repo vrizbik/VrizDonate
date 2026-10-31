@@ -1,0 +1,595 @@
+package me.vrizbik.donate;
+
+import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Material;
+import org.bukkit.Sound;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.enchantment.PrepareItemEnchantEvent;
+import org.bukkit.event.inventory.ClickType;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.inventory.CookingRecipe;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemFlag;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.Recipe;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.plugin.java.JavaPlugin;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
+
+public class VrizDonatePlugin extends JavaPlugin implements Listener, CommandExecutor {
+
+    private static final long WEEK_MILLIS = 7L * 24 * 60 * 60 * 1000;
+    private final Set<UUID> customEnchantingUsers = new HashSet<>();
+
+    private File dataFile;
+    private FileConfiguration dataConfig;
+
+    public enum Rank {
+        VIP("vip", "§a§lVIP", "99₽", Material.LIME_SHULKER_BOX, 10, "vrizdonate.vip", Arrays.asList(
+                "§7Возможности привилегии:",
+                "§a✔ §fВиртуальный верстак: §e/wb",
+                "§a✔ §fВиртуальное точило: §e/grindstone",
+                "§a✔ §fУникальный кит §aVIP §f(раз в неделю): §e/kit"
+        )),
+        PREMIUM("premium", "§b§lPREMIUM", "199₽", Material.LIGHT_BLUE_SHULKER_BOX, 12, "vrizdonate.premium", Arrays.asList(
+                "§7Возможности привилегии:",
+                "§b✔ §fВсе возможности §aVIP",
+                "§b✔ §fВиртуальная наковальня: §e/anvil",
+                "§b✔ §fВосстановить голод: §e/feed",
+                "§b✔ §fУникальный кит §bPREMIUM §f(раз в неделю): §e/kit"
+        )),
+        DELUX("delux", "§d§lDELUX", "299₽", Material.MAGENTA_SHULKER_BOX, 14, "vrizdonate.delux", Arrays.asList(
+                "§7Возможности привилегии:",
+                "§d✔ §fВсе возможности §aVIP §fи §bPREMIUM",
+                "§d✔ §fСтол кузнеца: §e/smithingtable",
+                "§d✔ §fПолное исцеление: §e/heal",
+                "§d✔ §fУникальный кит §dDELUX §f(раз в неделю): §e/kit"
+        )),
+        SPONSOR("sponsor", "§6§lSPONSOR", "399₽", Material.YELLOW_SHULKER_BOX, 16, "vrizdonate.sponsor", Arrays.asList(
+                "§7Возможности привилегии:",
+                "§6✔ §fВсе возможности донатов ниже",
+                "§6✔ §fСтол зачарований (30 УРОВЕНЬ): §e/enchanttable",
+                "§6✔ §fВиртуальная печка: §e/furnace",
+                "§6✔ §fУникальный кит §6SPONSOR §f(раз в неделю): §e/kit"
+        ));
+
+        public final String id;
+        public final String displayName;
+        public final String price;
+        public final Material shulker;
+        public final int slot;
+        public final String permission;
+        public final List<String> features;
+
+        Rank(String id, String displayName, String price, Material shulker, int slot, String permission, List<String> features) {
+            this.id = id;
+            this.displayName = displayName;
+            this.price = price;
+            this.shulker = shulker;
+            this.slot = slot;
+            this.permission = permission;
+            this.features = features;
+        }
+
+        public static Rank fromSlot(int slot) {
+            for (Rank r : values()) {
+                if (r.slot == slot) return r;
+            }
+            return null;
+        }
+
+        public static Rank fromId(String id) {
+            for (Rank r : values()) {
+                if (r.id.equalsIgnoreCase(id)) return r;
+            }
+            return null;
+        }
+    }
+
+    private static class DonateHolder implements InventoryHolder {
+        final String menuType; // "MAIN", "PREVIEW", "FURNACE"
+        final Rank rank;
+
+        DonateHolder(String menuType, Rank rank) {
+            this.menuType = menuType;
+            this.rank = rank;
+        }
+
+        @Override
+        public Inventory getInventory() {
+            return null;
+        }
+    }
+
+    @Override
+    public void onEnable() {
+        createDataFile();
+        setupDefaultKits();
+        Bukkit.getPluginManager().registerEvents(this, this);
+
+        String[] commands = {"donate", "kit", "setdonatekit", "wb", "grindstone", "anvil", "feed", "smithingtable", "heal", "enchanttable", "furnace"};
+        for (String cmd : commands) {
+            if (getCommand(cmd) != null) {
+                getCommand(cmd).setExecutor(this);
+            }
+        }
+        getLogger().info("VrizDonate успешно запущен! Телеграм: @vrizbik");
+    }
+
+    private void createDataFile() {
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
+        }
+        dataFile = new File(getDataFolder(), "data.yml");
+        if (!dataFile.exists()) {
+            try {
+                dataFile.createNewFile();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        dataConfig = YamlConfiguration.loadConfiguration(dataFile);
+    }
+
+    private void saveData() {
+        try {
+            dataConfig.save(dataFile);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void setupDefaultKits() {
+        boolean changed = false;
+        for (Rank rank : Rank.values()) {
+            if (!dataConfig.contains("kits." + rank.id)) {
+                List<ItemStack> defaultItems = createDefaultKit(rank);
+                dataConfig.set("kits." + rank.id, defaultItems);
+                changed = true;
+            }
+        }
+        if (changed) saveData();
+    }
+
+    private List<ItemStack> createDefaultKit(Rank rank) {
+        List<ItemStack> items = new ArrayList<>();
+        switch (rank) {
+            case VIP:
+                items.add(enchant(new ItemStack(Material.IRON_HELMET), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.IRON_CHESTPLATE), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.IRON_LEGGINGS), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.IRON_BOOTS), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.IRON_SWORD), Enchantment.DAMAGE_ALL, 2));
+                items.add(new ItemStack(Material.GOLDEN_APPLE, 8));
+                items.add(new ItemStack(Material.COOKED_BEEF, 32));
+                break;
+            case PREMIUM:
+                items.add(enchant(new ItemStack(Material.DIAMOND_HELMET), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.DIAMOND_CHESTPLATE), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.DIAMOND_LEGGINGS), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.DIAMOND_BOOTS), Enchantment.PROTECTION_ENVIRONMENTAL, 2));
+                items.add(enchant(new ItemStack(Material.DIAMOND_SWORD), Enchantment.DAMAGE_ALL, 3));
+                items.add(new ItemStack(Material.GOLDEN_APPLE, 16));
+                items.add(new ItemStack(Material.DIAMOND, 16));
+                break;
+            case DELUX:
+                items.add(enchant(new ItemStack(Material.DIAMOND_HELMET), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.DIAMOND_CHESTPLATE), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.DIAMOND_LEGGINGS), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.DIAMOND_BOOTS), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.DIAMOND_SWORD), Enchantment.DAMAGE_ALL, 4));
+                items.add(new ItemStack(Material.GOLDEN_APPLE, 32));
+                items.add(new ItemStack(Material.TOTEM_OF_UNDYING, 1));
+                break;
+            case SPONSOR:
+                items.add(enchant(new ItemStack(Material.NETHERITE_HELMET), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.NETHERITE_CHESTPLATE), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.NETHERITE_LEGGINGS), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.NETHERITE_BOOTS), Enchantment.PROTECTION_ENVIRONMENTAL, 4));
+                items.add(enchant(new ItemStack(Material.NETHERITE_SWORD), Enchantment.DAMAGE_ALL, 5));
+                items.add(new ItemStack(Material.ENCHANTED_GOLDEN_APPLE, 4));
+                items.add(new ItemStack(Material.TOTEM_OF_UNDYING, 2));
+                break;
+        }
+        return items;
+    }
+
+    private ItemStack enchant(ItemStack item, Enchantment ench, int level) {
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.addEnchant(ench, level, true);
+            item.setItemMeta(meta);
+        }
+        return item;
+    }
+
+    // Определяет ТОЛЬКО ОДИН (высший) ранг игрока для выдачи кита и проверки прав
+    private Rank getPlayerHighestRank(Player p) {
+        if (p.hasPermission(Rank.SPONSOR.permission)) return Rank.SPONSOR;
+        if (p.hasPermission(Rank.DELUX.permission)) return Rank.DELUX;
+        if (p.hasPermission(Rank.PREMIUM.permission)) return Rank.PREMIUM;
+        if (p.hasPermission(Rank.VIP.permission)) return Rank.VIP;
+        return null;
+    }
+
+    private boolean hasAtLeast(Player p, Rank required) {
+        Rank current = getPlayerHighestRank(p);
+        if (current == null) return false;
+        return current.ordinal() >= required.ordinal();
+    }
+
+    private void openDonateMenu(Player player) {
+        Inventory inv = Bukkit.createInventory(new DonateHolder("MAIN", null), 27, "§8★ §6§lДОНАТ МЕНЮ §8★");
+
+        ItemStack filler = createGuiItem(Material.GRAY_STAINED_GLASS_PANE, " ");
+        for (int i = 0; i < 27; i++) {
+            inv.setItem(i, filler);
+        }
+
+        for (Rank rank : Rank.values()) {
+            List<String> lore = new ArrayList<>();
+            lore.add("§8▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬");
+            lore.add("§fСтоимость: §e§l" + rank.price);
+            lore.add("");
+            lore.addAll(rank.features);
+            lore.add("");
+            lore.add("§6▶ §eНажмите ПКМ§f, чтобы посмотреть кит");
+            lore.add("§b▶ §fКупить в ТГ: §b§l@vrizbik");
+            lore.add("§8▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬");
+
+            inv.setItem(rank.slot, createGuiItem(rank.shulker, rank.displayName + " §8— §e" + rank.price, lore));
+        }
+
+        inv.setItem(22, createGuiItem(Material.NETHER_STAR, "§b§lПокупка доната", Arrays.asList(
+                "§7Для покупки любой привилегии",
+                "§7напишите в наш Telegram:",
+                "",
+                "§fТелеграм: §b§n@vrizbik",
+                "",
+                "§eНажмите, чтобы вывести контакт в чат!"
+        )));
+
+        player.openInventory(inv);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<ItemStack> getKitItems(Rank rank) {
+        List<?> list = dataConfig.getList("kits." + rank.id);
+        List<ItemStack> result = new ArrayList<>();
+        if (list != null) {
+            for (Object obj : list) {
+                if (obj instanceof ItemStack) {
+                    result.add(((ItemStack) obj).clone());
+                }
+            }
+        }
+        return result;
+    }
+
+    private void openKitPreview(Player player, Rank rank) {
+        Inventory inv = Bukkit.createInventory(new DonateHolder("PREVIEW", rank), 54, "§8Кит привилегии " + rank.displayName);
+
+        List<ItemStack> items = getKitItems(rank);
+        for (int i = 0; i < items.size() && i < 45; i++) {
+            inv.setItem(i, items.get(i));
+        }
+
+        ItemStack line = createGuiItem(Material.BLACK_STAINED_GLASS_PANE, " ");
+        for (int i = 45; i < 54; i++) {
+            inv.setItem(i, line);
+        }
+
+        inv.setItem(48, createGuiItem(Material.ARROW, "§c§lНазад в меню", Collections.singletonList("§7Вернуться к списку донатов")));
+        inv.setItem(49, createGuiItem(Material.CHEST, "§e§lПолучить этот кит", Arrays.asList(
+                "§7Команда получения: §e/kit",
+                "§7Доступно раз в §c7 дней§7!",
+                "§7Покупка: §b@vrizbik"
+        )));
+
+        player.openInventory(inv);
+    }
+
+    private void openVirtualFurnace(Player player) {
+        Inventory inv = Bukkit.createInventory(new DonateHolder("FURNACE", null), 27, "§8Виртуальная печка [SPONSOR]");
+        ItemStack glass = createGuiItem(Material.GRAY_STAINED_GLASS_PANE, " ");
+        for (int i = 0; i < 27; i++) inv.setItem(i, glass);
+
+        inv.setItem(13, null); // Слот для переплавки
+        inv.setItem(22, createGuiItem(Material.FLINT_and_STEEL, "§6§lПереплавить предмет", Arrays.asList(
+                "§7Положите руду или еду в слот выше",
+                "§7и нажмите сюда для мгновенной переплавки!"
+        )));
+        player.openInventory(inv);
+    }
+
+    private ItemStack createGuiItem(Material mat, String name, List<String> lore) {
+        ItemStack item = new ItemStack(mat);
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.setDisplayName(name);
+            if (lore != null) meta.setLore(lore);
+            meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES, ItemFlag.HIDE_POTION_EFFECTS);
+            item.setItemMeta(meta);
+        }
+        return item;
+    }
+
+    private ItemStack createGuiItem(Material mat, String name) {
+        return createGuiItem(mat, name, null);
+    }
+
+    @EventHandler
+    public void onInventoryClick(InventoryClickEvent e) {
+        if (!(e.getWhoClicked() instanceof Player)) return;
+        Player player = (Player) e.getWhoClicked();
+
+        if (!(e.getInventory().getHolder() instanceof DonateHolder)) return;
+        DonateHolder holder = (DonateHolder) e.getInventory().getHolder();
+
+        if ("MAIN".equals(holder.menuType)) {
+            e.setCancelled(true);
+            int slot = e.getRawSlot();
+
+            if (slot == 22) {
+                player.closeInventory();
+                player.sendMessage("§8▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬");
+                player.sendMessage(" §6§lПОКУПКА ДОНАТА");
+                player.sendMessage(" §fНапишите в Telegram: §b§l@vrizbik");
+                player.sendMessage("§8▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬");
+                player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f);
+                return;
+            }
+
+            Rank clickedRank = Rank.fromSlot(slot);
+            if (clickedRank != null) {
+                if (e.getClick() == ClickType.RIGHT || e.getClick() == ClickType.SHIFT_RIGHT || e.getClick() == ClickType.LEFT) {
+                    openKitPreview(player, clickedRank);
+                    player.playSound(player.getLocation(), Sound.BLOCK_SHULKER_BOX_OPEN, 1f, 1f);
+                }
+            }
+        } else if ("PREVIEW".equals(holder.menuType)) {
+            e.setCancelled(true);
+            if (e.getRawSlot() == 48) {
+                openDonateMenu(player);
+                player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1f);
+            } else if (e.getRawSlot() == 49) {
+                player.closeInventory();
+                player.performCommand("kit");
+            }
+        } else if ("FURNACE".equals(holder.menuType)) {
+            if (e.getRawSlot() < 27 && e.getRawSlot() != 13) {
+                e.setCancelled(true);
+                if (e.getRawSlot() == 22) {
+                    ItemStack input = e.getInventory().getItem(13);
+                    if (input == null || input.getType() == Material.AIR) {
+                        player.sendMessage("§cПоложите предмет в центральный слот!");
+                        return;
+                    }
+                    ItemStack smelted = getSmeltedResult(input);
+                    if (smelted == null) {
+                        player.sendMessage("§cЭтот предмет нельзя переплавить!");
+                        return;
+                    }
+                    smelted.setAmount(input.getAmount());
+                    e.getInventory().setItem(13, smelted);
+                    player.playSound(player.getLocation(), Sound.BLOCK_FURNACE_FIRE_CRACKLE, 1f, 1f);
+                    player.sendMessage("§aПредмет успешно переплавлен!");
+                }
+            }
+        }
+    }
+
+    private ItemStack getSmeltedResult(ItemStack input) {
+        Iterator<Recipe> iter = Bukkit.recipeIterator();
+        while (iter.hasNext()) {
+            Recipe recipe = iter.next();
+            if (recipe instanceof CookingRecipe) {
+                CookingRecipe<?> cooking = (CookingRecipe<?>) recipe;
+                if (cooking.getInputChoice().test(input)) {
+                    return cooking.getResult().clone();
+                }
+            }
+        }
+        return null;
+    }
+
+    @EventHandler
+    public void onPrepareEnchant(PrepareItemEnchantEvent e) {
+        if (customEnchantingUsers.contains(e.getEnchanter().getUniqueId())) {
+            e.getOffers()[0] = e.getOffers()[0] != null ? e.getOffers()[0] : null;
+            // Устанавливаем бонус 15 книжных полок = максимальный 30 уровень зачарования
+            try {
+                if (e.getOffers()[2] != null) {
+                    e.getOffers()[2].setCost(30);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @EventHandler
+    public void onInventoryClose(InventoryCloseEvent e) {
+        customEnchantingUsers.remove(e.getPlayer().getUniqueId());
+        if (e.getInventory().getHolder() instanceof DonateHolder) {
+            DonateHolder holder = (DonateHolder) e.getInventory().getHolder();
+            if ("FURNACE".equals(holder.menuType)) {
+                ItemStack left = e.getInventory().getItem(13);
+                if (left != null && left.getType() != Material.AIR) {
+                    e.getPlayer().getInventory().addItem(left);
+                }
+            }
+        }
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("Команда доступна только игрокам!");
+            return true;
+        }
+        Player p = (Player) sender;
+        String cmd = command.getName().toLowerCase();
+
+        switch (cmd) {
+            case "donate":
+                openDonateMenu(p);
+                return true;
+
+            case "setdonatekit":
+                if (!p.hasPermission("vrizdonate.admin") && !p.isOp()) {
+                    p.sendMessage("§cНет прав!");
+                    return true;
+                }
+                if (args.length < 1) {
+                    p.sendMessage("§eИспользование: /setdonatekit <vip|premium|delux|sponsor>");
+                    return true;
+                }
+                Rank targetRank = Rank.fromId(args[0]);
+                if (targetRank == null) {
+                    p.sendMessage("§cНеверный донат! Доступны: vip, premium, delux, sponsor");
+                    return true;
+                }
+                List<ItemStack> newKit = new ArrayList<>();
+                for (ItemStack item : p.getInventory().getStorageContents()) {
+                    if (item != null && item.getType() != Material.AIR) {
+                        newKit.add(item.clone());
+                    }
+                }
+                for (ItemStack armor : p.getInventory().getArmorContents()) {
+                    if (armor != null && armor.getType() != Material.AIR) {
+                        newKit.add(armor.clone());
+                    }
+                }
+                dataConfig.set("kits." + targetRank.id, newKit);
+                saveData();
+                p.sendMessage("§aКит для привилегии " + targetRank.displayName + " §aуспешно сохранён из вашего инвентаря!");
+                return true;
+
+            case "kit":
+                Rank ownRank = getPlayerHighestRank(p);
+                if (ownRank == null) {
+                    p.sendMessage("§cУ вас нет привилегии! Купить донат: §e/donate §f(ТГ: §b@vrizbik§f)");
+                    return true;
+                }
+                long lastClaim = dataConfig.getLong("cooldowns." + p.getUniqueId(), 0L);
+                long now = System.currentTimeMillis();
+                if (now - lastClaim < WEEK_MILLIS && !p.hasPermission("vrizdonate.admin")) {
+                    long remaining = (WEEK_MILLIS - (now - lastClaim)) / 1000;
+                    long days = remaining / 86400;
+                    long hours = (remaining % 86400) / 3600;
+                    long minutes = (remaining % 3600) / 60;
+                    p.sendMessage("§cВы уже получали свой кит! Следующий будет доступен через: §e"
+                            + days + " дн. " + hours + " ч. " + minutes + " мин.");
+                    return true;
+                }
+
+                List<ItemStack> kitItems = getKitItems(ownRank);
+                for (ItemStack item : kitItems) {
+                    HashMap<Integer, ItemStack> left = p.getInventory().addItem(item.clone());
+                    for (ItemStack drop : left.values()) {
+                        p.getWorld().dropItemNaturally(p.getLocation(), drop);
+                    }
+                }
+                dataConfig.set("cooldowns." + p.getUniqueId(), now);
+                saveData();
+                p.sendMessage("§aВы успешно получили свой еженедельный кит " + ownRank.displayName + "§a!");
+                p.playSound(p.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1f, 1f);
+                return true;
+
+            // --- VIP команды (и для всех донатов выше) ---
+            case "wb":
+                if (!hasAtLeast(p, Rank.VIP)) {
+                    sendNoPerm(p, Rank.VIP);
+                    return true;
+                }
+                p.openWorkbench(null, true);
+                return true;
+
+            case "grindstone":
+                if (!hasAtLeast(p, Rank.VIP)) {
+                    sendNoPerm(p, Rank.VIP);
+                    return true;
+                }
+                p.openInventory(Bukkit.createInventory(p, InventoryType.GRINDSTONE, "§8Виртуальное точило"));
+                return true;
+
+            // --- PREMIUM команды (и для DELUX, SPONSOR) ---
+            case "anvil":
+                if (!hasAtLeast(p, Rank.PREMIUM)) {
+                    sendNoPerm(p, Rank.PREMIUM);
+                    return true;
+                }
+                p.openInventory(Bukkit.createInventory(p, InventoryType.ANVIL, "§8Виртуальная наковальня"));
+                return true;
+
+            case "feed":
+                if (!hasAtLeast(p, Rank.PREMIUM)) {
+                    sendNoPerm(p, Rank.PREMIUM);
+                    return true;
+                }
+                p.setFoodLevel(20);
+                p.setSaturation(20f);
+                p.sendMessage("§aВаш голод полностью утолён!");
+                return true;
+
+            // --- DELUX команды (и для SPONSOR) ---
+            case "smithingtable":
+                if (!hasAtLeast(p, Rank.DELUX)) {
+                    sendNoPerm(p, Rank.DELUX);
+                    return true;
+                }
+                p.openInventory(Bukkit.createInventory(p, InventoryType.SMITHING, "§8Стол кузнеца"));
+                return true;
+
+            case "heal":
+                if (!hasAtLeast(p, Rank.DELUX)) {
+                    sendNoPerm(p, Rank.DELUX);
+                    return true;
+                }
+                p.setHealth(p.getMaxHealth());
+                p.setFoodLevel(20);
+                p.setFireTicks(0);
+                p.sendMessage("§aВы полностью исцелены!");
+                return true;
+
+            // --- SPONSOR команды ---
+            case "enchanttable":
+                if (!hasAtLeast(p, Rank.SPONSOR)) {
+                    sendNoPerm(p, Rank.SPONSOR);
+                    return true;
+                }
+                customEnchantingUsers.add(p.getUniqueId());
+                p.openEnchanting(null, true);
+                p.sendMessage("§6Открыт стол зачарований §e(Максимальный 30 уровень)§6!");
+                return true;
+
+            case "furnace":
+                if (!hasAtLeast(p, Rank.SPONSOR)) {
+                    sendNoPerm(p, Rank.SPONSOR);
+                    return true;
+                }
+                openVirtualFurnace(p);
+                return true;
+        }
+        return false;
+    }
+
+    private void sendNoPerm(Player p, Rank needed) {
+        p.sendMessage("§cЭта команда доступна от привилегии " + needed.displayName + " §cи выше! Купить: §e/donate §7(ТГ: @vrizbik)");
+    }
+}
